@@ -9,6 +9,9 @@
 <link rel="manifest" href="site.webmanifest">
 <meta name="theme-color" content="#0b0a12">
 <script>try{const s=JSON.parse(localStorage.getItem("animeLog.settings.v1")||"{}");const m=s.mode==="system"?(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"):(s.mode||"dark");document.documentElement.dataset.mode=m;document.documentElement.dataset.theme=s.theme||"ocean";const z=s.zoom||1;document.documentElement.style.zoom=z;document.documentElement.style.setProperty("--z",z);}catch(e){}</script>
+<link rel="preconnect" href="https://graphql.anilist.co" crossorigin>
+<link rel="preconnect" href="https://s4.anilist.co">
+<link rel="dns-prefetch" href="https://cdn.myanimelist.net">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;800&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&display=swap" rel="stylesheet">
@@ -1402,7 +1405,7 @@ function renderResults(items, label, animate = true){
   el.innerHTML = `<div class="grid">${items.map((a, i) => {
     const m = snapshot(a), on = !!data.entries[a.mal_id];
     return `<div class="card" data-i="${i}" style="--d:${animate ? Math.min(i, 18) * 40 : 0}ms;${animate ? "" : "animation:none"}">
-      <div class="imgw"><img src="${esc(m.image)}" alt="" loading="lazy">
+      <div class="imgw"><img src="${esc(m.image)}" alt="" ${i < 12 ? `fetchpriority="high"` : `loading="lazy"`} decoding="async">
       ${m.score ? `<div class="badge" style="${scoreStyle(m.score).replace("--sc", "background")}">★ ${m.score}</div>` : ""}
       ${m.rank ? `<div class="rk">#${fmt(m.rank)}</div>` : ""}
       ${on ? `<div class="onlist">✓ On list</div>` : ""}</div>
@@ -1474,13 +1477,41 @@ $("#searchForm").addEventListener("submit", async e => {
   try { renderResults(await searchMal(q), q); }
   catch (err){ showFailure(err); }
 });
+// Browse lists are remembered for a few hours so they show instantly, then quietly refreshed
+const KEY_BROWSE = "animeLog.browse.v1";
+let browseCache = store.load(KEY_BROWSE, {});
+const browseInflight = {};
+function fetchBrowse(kind){
+  return browseInflight[kind] ||= api.browse(kind).then(items => {
+    items = dedupe(items);
+    browseCache[kind] = { at: Date.now(), src: settings.source || "anilist", items };
+    store.save(KEY_BROWSE, browseCache);
+    return items;
+  }).finally(() => delete browseInflight[kind]);
+}
+function warmImages(items, n = 12){ items.slice(0, n).forEach(a => { const u = snapshot(a).image; if (u){ const im = new Image(); im.fetchPriority = "high"; im.src = u; } }); }
 document.querySelector(".quick").addEventListener("click", async e => {
   const b = e.target.closest("[data-browse]"); if (!b) return;
+  const kind = b.dataset.browse;
   document.querySelectorAll(".quick button,.genres button").forEach(x => x.classList.toggle("on", x === b));
+  const hit = browseCache[kind], stillOn = () => b.classList.contains("on");
+  const fresh = hit && hit.src === (settings.source || "anilist") && Date.now() - hit.at < 6 * 36e5;
+  if (hit?.items?.length){
+    renderResults(hit.items);
+    if (fresh) return;
+    try { const items = await fetchBrowse(kind); if (stillOn() && items.map(a => a.mal_id).join() !== hit.items.map(a => a.mal_id).join()) renderResults(items, "", false); } catch {}
+    return;
+  }
   loading();
-  try { renderResults(dedupe(await api.browse(b.dataset.browse))); }
-  catch (err){ showFailure(err); }
+  try { const items = await fetchBrowse(kind); if (stillOn()) renderResults(items); }
+  catch (err){ if (stillOn()) showFailure(err); }
 });
+// Start loading "Top rated" (and its art) as soon as the page opens, so Add Anime is ready when you get there
+setTimeout(() => {
+  const hit = browseCache.top;
+  if (hit?.items?.length) warmImages(hit.items);
+  if (!hit || Date.now() - hit.at > 6 * 36e5 || hit.src !== (settings.source || "anilist")) fetchBrowse("top").then(warmImages).catch(() => {});
+}, 0);
 
 /* ---------------- Detail modal ---------------- */
 let modalStack = [], current = null;
