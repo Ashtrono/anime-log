@@ -8,7 +8,7 @@
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="site.webmanifest">
 <meta name="theme-color" content="#0b0a12">
-<script>try{const s=JSON.parse(localStorage.getItem("animeLog.settings.v1")||"{}");const m=s.mode==="system"?(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"):(s.mode||"dark");document.documentElement.dataset.mode=m;document.documentElement.dataset.theme=s.theme||"ocean";const z=s.zoom||1;document.documentElement.style.zoom=z;document.documentElement.style.setProperty("--z",z);}catch(e){}</script>
+<script>try{const s=JSON.parse(localStorage.getItem("animeLog.settings.v1")||"{}");const m=s.mode==="system"?(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"):(s.mode||"dark");document.documentElement.dataset.mode=m;document.documentElement.dataset.theme=s.theme||"ocean";const z=s.zoom||(Math.min(screen.width,screen.height)<600?0.7:1);document.documentElement.style.zoom=z;document.documentElement.style.setProperty("--z",z);}catch(e){}</script>
 <link rel="preconnect" href="https://graphql.anilist.co" crossorigin>
 <link rel="preconnect" href="https://s4.anilist.co">
 <link rel="dns-prefetch" href="https://cdn.myanimelist.net">
@@ -752,7 +752,7 @@
       <div class="hint">Animated effects in the empty margins on each side of the page. They use your color theme and fade out before they reach your content.</div>
       <label>Page size</label>
       <div class="zoomrow"><span class="hint" style="margin:0">50%</span><input type="range" id="zoomRange" min="50" max="150" step="10" value="100" aria-label="Page size"><span class="hint" style="margin:0">150%</span><b id="zoomVal">100%</b><button type="button" class="btn ghost" id="zoomReset">Reset</button></div>
-      <div class="hint">Your browser's own zoom (Ctrl/Cmd + and −) still works on top of this.</div>
+      <div class="hint">Starts at 70% on phones and 100% elsewhere. Reset goes back to that. Your browser's own zoom (Ctrl/Cmd + and −) still works on top of this.</div>
     </div>
 
     <div class="panel" style="--d:0ms">
@@ -3319,11 +3319,13 @@ $("#themePick").innerHTML = THEMES.map(([k, n, c]) => `<button type="button" dat
 $("#fxPick").innerHTML = FX_PRESETS.map(([k, n, e]) => `<button type="button" data-fx="${k}"><span class="e">${e}</span>${n}</button>`).join("");
 $("#fxLevel").innerHTML = FX_LEVELS.map(([k, n]) => `<button type="button" data-fxl="${k}">${n}</button>`).join("");
 const sysLight = matchMedia("(prefers-color-scheme: light)");
+// Phones start at 70% so more fits on screen; everything else at 100%
+const defaultZoom = () => Math.min(screen.width, screen.height) < 600 ? 0.7 : 1;
 function applyAppearance(){
   const mode = settings.mode === "system" ? (sysLight.matches ? "light" : "dark") : (settings.mode || "dark");
   const root = document.documentElement;
   root.dataset.mode = mode; root.dataset.theme = settings.theme || "ocean";
-  const z = settings.zoom || 1;
+  const z = settings.zoom || defaultZoom();
   root.style.zoom = z; root.style.setProperty("--z", z);
   $("#zoomRange").value = Math.round(z * 100); $("#zoomVal").textContent = Math.round(z * 100) + "%";
   requestAnimationFrame(moveInd);
@@ -3343,7 +3345,7 @@ $("#themePick").addEventListener("click", e => { const b = e.target.closest("[da
 // Preview while dragging, save when released
 $("#zoomRange").addEventListener("input", e => { $("#zoomVal").textContent = e.target.value + "%"; });
 $("#zoomRange").addEventListener("change", e => { settings.zoom = Number(e.target.value) / 100; saveAppearance(); });
-$("#zoomReset").addEventListener("click", () => { settings.zoom = 1; saveAppearance(); });
+$("#zoomReset").addEventListener("click", () => { delete settings.zoom; saveAppearance(); });
 $("#fxPick").addEventListener("click", e => { const b = e.target.closest("[data-fx]"); if (b){ settings.fx = b.dataset.fx; saveAppearance(); } });
 $("#fxLevel").addEventListener("click", e => { const b = e.target.closest("[data-fxl]"); if (b){ settings.fxLevel = b.dataset.fxl; saveAppearance(); } });
 $("#modeBtn").addEventListener("click", () => { settings.mode = document.documentElement.dataset.mode === "light" ? "dark" : "light"; saveAppearance(); });
