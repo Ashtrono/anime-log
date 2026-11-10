@@ -8,7 +8,7 @@
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="manifest" href="site.webmanifest">
 <meta name="theme-color" content="#0b0a12">
-<script>try{const s=JSON.parse(localStorage.getItem("animeLog.settings.v1")||"{}");const m=s.mode==="system"?(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"):(s.mode||"dark");document.documentElement.dataset.mode=m;document.documentElement.dataset.theme=s.theme||"neon";const z=s.zoom||1;document.documentElement.style.zoom=z;document.documentElement.style.setProperty("--z",z);}catch(e){}</script>
+<script>try{const s=JSON.parse(localStorage.getItem("animeLog.settings.v1")||"{}");const m=s.mode==="system"?(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"):(s.mode||"dark");document.documentElement.dataset.mode=m;document.documentElement.dataset.theme=s.theme||"ocean";const z=s.zoom||1;document.documentElement.style.zoom=z;document.documentElement.style.setProperty("--z",z);}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;800&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&display=swap" rel="stylesheet">
@@ -328,6 +328,10 @@
   .ri-m{color:var(--faint);font-size:12.5px}
   .ri-meta{display:inline-flex;gap:6px;align-items:center;margin-left:auto}
   .ri-meta .badge{padding:2px 8px;border-radius:7px;font-size:11px;font-weight:800;color:#fff}
+  .ri-fix{border:1px solid var(--line);background:none;color:var(--faint);border-radius:8px;padding:2px 8px;font-size:11px;font-weight:700;transition:color .15s,border-color .15s}
+  .ri-fix:hover{color:var(--ink);border-color:rgba(var(--p-rgb),.6)}
+  .picker{padding:26px 28px 24px}
+  .picker h3{font-family:Unbounded,sans-serif;font-weight:500;margin:0 0 6px}
   .ri-add{border:0;background:var(--grad);color:#fff;border-radius:8px;padding:3px 9px;font-size:11px;font-weight:800;transition:transform .15s}
   .ri-add:hover{transform:scale(1.08)}
   .ri-why{color:var(--ink2);font-size:14px;line-height:1.6;margin-top:5px}
@@ -1390,17 +1394,42 @@ $("#results").addEventListener("click", e => {
 });
 
 function dedupe(list){ const s = new Set(); return list.filter(a => !s.has(a.mal_id) && s.add(a.mal_id)); }
-function relevance(a, q){
-  q = q.toLowerCase().trim();
-  const titles = [a.title, a.title_english, a.title_japanese, ...(a.title_synonyms || []), ...((a.titles || []).map(t => t.title))].filter(Boolean).map(t => t.toLowerCase());
-  if (titles.some(t => t === q)) return 3;
-  if (titles.some(t => t.startsWith(q))) return 2;
-  if (titles.some(t => t.includes(q))) return 1;
-  return 0;
+// Title matching: compares the AI's (or your) wording with every title MAL has for a show,
+// ignoring case, punctuation and accents, so "Fullmetal Alchemist Brotherhood" finds
+// "Fullmetal Alchemist: Brotherhood" instead of whatever happens to be most popular.
+const normT = s => String(s || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
+function bigrams(s){ const t = ` ${s} `, m = new Map(); for (let i = 0; i < t.length - 1; i++){ const g = t.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); } return m; }
+function dice(a, b){
+  if (!a || !b) return 0; if (a === b) return 1;
+  const A = bigrams(a), B = bigrams(b); let inter = 0, n = 0;
+  for (const v of A.values()) n += v; for (const v of B.values()) n += v;
+  for (const [g, v] of A) inter += Math.min(v, B.get(g) || 0);
+  return 2 * inter / n;
 }
-async function searchMal(q){
+const SEQUEL_RE = /\b(season|2nd|3rd|[4-9]th|part|movie|film|ova|oad|special|specials|recap|zoku|kan|final|ii|iii|iv|2|3|4|5|6)\b/;
+function titleScore(a, q){
+  const nq = normT(q); if (!nq) return 0;
+  const titles = [a.title, a.title_english, a.title_japanese, ...(a.title_synonyms || []), ...((a.titles || []).map(t => t.title))].filter(Boolean).map(normT).filter(Boolean);
+  let best = 0;
+  for (const t of titles){
+    let sc = t === nq ? 1.2 : dice(t, nq);
+    // "Frieren" should mean the first season, not "Frieren Season 2", unless a season/part was asked for
+    if (t !== nq && t.startsWith(nq + " ") && SEQUEL_RE.test(t.slice(nq.length)) && !SEQUEL_RE.test(nq)) sc -= 0.15;
+    best = Math.max(best, sc);
+  }
+  return best;
+}
+const TYPE_W = { TV: 0.06, Movie: 0.03, ONA: 0.02, OVA: 0, Special: -0.03, "TV Special": -0.03, Music: -0.15, PV: -0.2, CM: -0.2 };
+function matchScore(a, q, year){
+  let sc = titleScore(a, q) + (TYPE_W[a.type] ?? 0) + Math.min(0.08, Math.log10((a.members || 0) + 1) / 80);
+  const y = a.year || a.aired?.prop?.from?.year;
+  if (year && y) sc += Math.abs(y - year) <= 1 ? 0.12 : -0.05;
+  return sc;
+}
+const relevance = (a, q) => titleScore(a, q);
+async function searchMal(q, year){
   const res = await api.search(q);
-  return dedupe(res).sort((a, b) => relevance(b, q) - relevance(a, q) || (b.members || 0) - (a.members || 0));
+  return dedupe(res).sort((a, b) => matchScore(b, q, year) - matchScore(a, q, year));
 }
 
 $("#searchForm").addEventListener("submit", async e => {
@@ -1948,7 +1977,7 @@ function renderStatsView(){
 $("#statsBody").addEventListener("click", e => { const t = e.target.closest("[data-take]"); if (t) openDetail(null, Number(t.dataset.take)); });
 
 /* ---------------- Chat ---------------- */
-function recTitles(text){ return [...new Set([...text.matchAll(/\[\[([^\]]+)\]\]/g)].map(m => m[1].trim()))].slice(0, 10); }
+function recTitles(text){ return [...new Set([...text.matchAll(/\[\[([^\]|]+)(?:\|\s*\d+)?\s*\]\]/g)].map(m => m[1].trim()))].slice(0, 10); }
 
 function mdLite(text){
   // Escape first, then a small Markdown renderer: headings, nested lists, quotes, tables, code, links,
@@ -1957,7 +1986,7 @@ function mdLite(text){
   let html = "", para = [], stack = [], recs = [], table = null;
   const inline = s => s
     .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\[\[([^\]]+)\]\]/g, (_, t) => `<span class="rec" data-q="${t}">${t}</span>`)
+    .replace(/\[\[([^\]|]+)(?:\|\s*(\d+))?\s*\]\]/g, (_, t, id) => { t = t.trim(); if (id) (recHints[t.toLowerCase()] ||= {}).id = Number(id); return `<span class="rec" data-q="${t}">${t}</span>`; })
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_]+)__/g, "<strong>$1</strong>")
@@ -1982,8 +2011,12 @@ function mdLite(text){
   };
   const flushAll = () => { flushPara(); flushRecs(); closeLists(); flushTable(); };
   const recItem = c => {
-    const m = c.match(/^(?:\*\*)?\[\[([^\]]+)\]\](?:\*\*)?\s*(?:\(([^)]{1,60})\))?\s*(?:[—–:-]+\s*)?(.*)$/);
-    return m ? { t: m[1], meta: m[2] || "", why: m[3] || "" } : null;
+    const m = c.match(/^(?:\*\*)?\[\[([^\]|]+)(?:\|\s*(\d+))?\s*\]\](?:\*\*)?\s*(?:\(([^)]{1,60})\))?\s*(?:[—–:-]+\s*)?(.*)$/);
+    if (!m) return null;
+    const t = m[1].trim(), h = (recHints[t.toLowerCase()] ||= {});
+    if (m[2]) h.id = Number(m[2]);
+    const yr = (m[3] || "").match(/\b(19[5-9]\d|20[0-4]\d)\b/); if (yr) h.year = Number(yr[1]);
+    return { t, meta: m[3] || "", why: m[4] || "" };
   };
 
   for (const raw of lines){
@@ -2064,11 +2097,31 @@ function renderChat(){
   fillPosters();
 }
 
-async function resolveRec(q){
+// Title hints the AI gave (an exact MAL id and/or a year), keyed by lowercased title
+const recHints = {};
+async function resolveRec(q, hint = recHints[q.toLowerCase()] || {}){
   const k = q.toLowerCase();
-  if (recCache[k]) return recCache[k];
-  const res = await searchMal(q);
-  recCache[k] = res.length ? { id: res[0].mal_id, mal: snapshot(res[0]) } : { none: true };
+  const c = recCache[k];
+  if (c && (c.v === 2 || c.pinned)) return c;   // older matches are re-checked with the better matcher
+  let pick = null;
+  if (hint.id){
+    // The AI said which MAL entry it meant; use it only if the title really matches (AIs can misremember ids)
+    try { const a = await api.get(hint.id); if (titleScore(a, q) >= 0.55) pick = a; } catch {}
+  }
+  if (!pick){
+    let res = await searchMal(q, hint.year);
+    const good = r => r.length && titleScore(r[0], q) >= 0.6;
+    if (!good(res)){
+      const alt = normT(q);
+      if (alt && alt !== k){
+        const r2 = (await searchMal(alt, hint.year)).sort((a, b) => matchScore(b, q, hint.year) - matchScore(a, q, hint.year));
+        if (r2.length && (!res.length || matchScore(r2[0], q, hint.year) > matchScore(res[0], q, hint.year))) res = r2;
+      }
+    }
+    // Better to show "not found" than someone else's show
+    if (res.length && titleScore(res[0], q) >= 0.4) pick = res[0];
+  }
+  recCache[k] = pick ? { v: 2, id: pick.mal_id, mal: snapshot(pick) } : { v: 2, none: true };
   const keys = Object.keys(recCache);
   if (keys.length > 300) keys.slice(0, keys.length - 300).forEach(x => delete recCache[x]);
   store.save(KEY_RECS, recCache);
@@ -2078,11 +2131,12 @@ function fillRecItem(el){
   const q = el.dataset.q, c = recCache[q.toLowerCase()];
   if (!c) return false;
   el.classList.remove("loading");
-  if (c.none){ el.classList.add("nf"); el.querySelector(".ri-img").innerHTML = `<div class="noimg">?</div>`; return true; }
+  if (c.none){ el.classList.add("nf"); el.querySelector(".ri-img").innerHTML = `<div class="noimg">?</div>`; el.querySelector(".ri-meta").innerHTML = `<button class="ri-fix" data-rifix="${esc(q)}">Find it</button>`; return true; }
   const m = c.mal, on = data.entries[c.id];
   el.querySelector(".ri-img").innerHTML = `<img src="${esc(m.image)}" alt="" loading="lazy">`;
   el.querySelector(".ri-meta").innerHTML = (m.score ? `<span class="badge" style="${scoreStyle(m.score).replace("--sc", "background")}">★ ${m.score}</span>` : "")
-    + (on ? `<span class="pill ${on.status}">${STATUS[on.status]}</span>` : `<button class="ri-add" data-riadd="${esc(q)}" title="Add as Plan to watch">＋ Plan</button>`);
+    + (on ? `<span class="pill ${on.status}">${STATUS[on.status]}</span>` : `<button class="ri-add" data-riadd="${esc(q)}" title="Add as Plan to watch">＋ Plan</button>`)
+    + `<button class="ri-fix" data-rifix="${esc(q)}" title="Wrong show? Pick the right one">Wrong?</button>`;
   const t = el.querySelector(".ri-t");
   if (m.title_english && t.textContent.toLowerCase() !== m.title_english.toLowerCase() && t.textContent.toLowerCase() !== m.title.toLowerCase()) t.title = m.title_english;
   return true;
@@ -2102,6 +2156,31 @@ async function fillPosters(){
       } catch { document.querySelectorAll("#msgs [data-q]").forEach(x => { if (x.dataset.q === q && x.classList.contains("loading")) x.dataset.failed = "1"; }); }
     }
   } finally { filling = false; }
+}
+// Pick the right anime for a title the AI mentioned; the choice is remembered
+async function openMatchPicker(q, query = q){
+  $("#modal").innerHTML = `<button class="x" aria-label="Close">×</button><div class="picker">
+    <h3>Which one did the AI mean?</h3>
+    <p class="tlnote">The AI wrote <b>${esc(q)}</b>. Pick the right anime and every card for that title will use it.</p>
+    <form id="pickForm" class="impform"><input type="search" id="pickQ" value="${esc(query)}"><button class="btn" type="submit">Search</button></form>
+    <div id="pickRes" style="margin-top:14px">${loadingHTML("Searching MyAnimeList…")}</div></div>`;
+  openOverlay(); $("#modal .x").onclick = closeModal;
+  $("#pickForm").onsubmit = e => { e.preventDefault(); openMatchPicker(q, $("#pickQ").value.trim() || q); };
+  try {
+    const res = (await searchMal(query)).slice(0, 12);
+    if (!$("#pickRes")) return;
+    if (!res.length){ $("#pickRes").innerHTML = `<p class="tlnote">Nothing found. Try another spelling or the Japanese title.</p>`; return; }
+    res.forEach(a => { if (!coverCache[a.mal_id]?.image) coverCache[a.mal_id] = { image: a.images?.webp?.large_image_url || a.images?.jpg?.large_image_url, format: a.type, year: a.year }; });
+    $("#pickRes").innerHTML = `<div class="relgrid">${res.map((a, i) => `<div class="relcard" data-pickfix="${a.mal_id}" style="--d:${i * 40}ms"><div class="pi"><img src="${esc(a.images?.webp?.large_image_url || a.images?.jpg?.large_image_url || "")}" alt="" loading="lazy"></div>
+      <div class="pt">${esc(a.title_english || a.title)}</div><div class="ps">${esc([a.type, a.year || a.aired?.prop?.from?.year].filter(Boolean).join(" · "))}</div></div>`).join("")}</div>`;
+    $("#pickRes").onclick = e => {
+      const c = e.target.closest("[data-pickfix]"); if (!c) return;
+      const a = res.find(x => x.mal_id === Number(c.dataset.pickfix));
+      recCache[q.toLowerCase()] = { v: 2, pinned: true, id: a.mal_id, mal: snapshot(a) };
+      store.save(KEY_RECS, recCache);
+      closeModal(); renderChat(); toast("Got it. That title now shows the right anime.");
+    };
+  } catch (err){ if ($("#pickRes")) $("#pickRes").innerHTML = `<p class="tlnote">${esc(err.message)}</p>`; }
 }
 function refreshRecBadges(){
   document.querySelectorAll("#msgs .rp:not(.loading)").forEach(p => { p.outerHTML = posterHTML(p.dataset.q, 0).replace(/--d:\d+ms/, "--d:0ms;animation:none"); });
@@ -2168,11 +2247,12 @@ function applyFields(e, a){
   e.updatedAt = Date.now();
 }
 async function runAction(a){
+  const a_title_ok = m => !a.title || titleScore(m, a.title) >= 0.55;
   const id = Number(a.mal_id);
   if (a.op === "add"){
     let snap = null, mid = id || null;
     if (mid && data.entries[mid]){ applyFields(data.entries[mid], a); return "Already on your list. Updated it instead"; }
-    if (mid){ try { snap = snapshot(await api.get(mid)); } catch {} }
+    if (mid){ try { const a = await api.get(mid); if (!a.title && !a.title_english) throw 0; if (!a_title_ok(a)) { mid = null; throw 0; } snap = snapshot(a); } catch {} }
     if (!snap){
       const c = await resolveRec(a.title || String(id));
       if (c.none) throw new Error(`Couldn't find “${a.title}” on MAL`);
@@ -2281,13 +2361,14 @@ Guidelines:
 - Base recommendations on their ranking, scores and notes. Pay close attention to the notes: they say what they actually liked or disliked.
 - Never recommend something already on their list unless they ask about it. Plan to watch titles are NOT watched: you may suggest which of those to start, but never say they've seen them.
 - If they ask what they've watched or how many, answer from the COMPLETED, CURRENTLY WATCHING, ON HOLD and DROPPED sections only.
-- Whenever you mention a specific anime, wrap its MAL title in double square brackets, e.g. [[Steins;Gate]] or [[Sousou no Frieren]], so the app can show its MAL poster. Use the title as it appears on MyAnimeList.
+- Whenever you mention a specific anime, wrap its title in double square brackets so the app can show its MAL poster, e.g. [[Steins;Gate]] or [[Sousou no Frieren]]. Use the exact title as it appears on MyAnimeList (English or romaji), and name the specific season or movie you mean ("Mob Psycho 100 II", not just "Mob Psycho 100", if you mean season 2).
+- If you're sure of the MyAnimeList ID, add it after a pipe: [[Steins;Gate|9253]], [[Vinland Saga|37521]]. For anime on the user's list, always use the mal_id shown above. If you're not sure of an ID, leave it out; a wrong ID is worse than none.
 - For each recommendation, give one or two sentences on why it fits them specifically, referencing titles on their list.
 
 FORMATTING (the app renders this as Markdown, so follow it closely):
 - Keep it easy to scan: a one-line intro, then the content, then at most one short closing line. Short paragraphs of 1 to 3 sentences.
 - Recommendations go in a bulleted list, one per line, each starting with the title in double brackets, optionally (year or type) in parentheses, then an em dash and the reason:
-  - [[Mushishi]] (2005) — Quiet, episodic and beautiful; the same reflective mood you loved in Frieren.
+  - [[Mushishi|457]] (2005) — Quiet, episodic and beautiful; the same reflective mood you loved in Frieren.
   The app turns each of these into a card with the MAL poster and score, so don't repeat the score or episode count in the text.
 - Use "### " headings only when you have two or more groups (e.g. "### Short and sweet" / "### Longer commitments").
 - Use **bold** sparingly for the key point. No tables unless they ask for a comparison. Don't nest lists more than one level.
@@ -2566,6 +2647,8 @@ $("#msgs").addEventListener("click", e => {
   if (st) return send(st.dataset.starter);
   const go = e.target.closest("[data-go]");
   if (go){ e.preventDefault(); return show(go.dataset.go); }
+  const fix = e.target.closest("[data-rifix]");
+  if (fix){ e.stopPropagation(); openMatchPicker(fix.dataset.rifix); return; }
   const add = e.target.closest("[data-riadd]");
   if (add){
     e.stopPropagation(); add.disabled = true; add.textContent = "…";
@@ -3103,20 +3186,20 @@ const sysLight = matchMedia("(prefers-color-scheme: light)");
 function applyAppearance(){
   const mode = settings.mode === "system" ? (sysLight.matches ? "light" : "dark") : (settings.mode || "dark");
   const root = document.documentElement;
-  root.dataset.mode = mode; root.dataset.theme = settings.theme || "neon";
+  root.dataset.mode = mode; root.dataset.theme = settings.theme || "ocean";
   const z = settings.zoom || 1;
   root.style.zoom = z; root.style.setProperty("--z", z);
   $("#zoomRange").value = Math.round(z * 100); $("#zoomVal").textContent = Math.round(z * 100) + "%";
   requestAnimationFrame(moveInd);
   setFavicon();
-  const fxp = settings.fx || "sparkle", fxl = settings.fxLevel || "mid";
+  const fxp = settings.fx || "starfall", fxl = settings.fxLevel || "mid";
   document.querySelectorAll("#fxPick [data-fx]").forEach(b => b.classList.toggle("on", b.dataset.fx === fxp));
   document.querySelectorAll("#fxLevel [data-fxl]").forEach(b => b.classList.toggle("on", b.dataset.fxl === fxl));
   $("#fxLevel").style.opacity = fxp === "off" ? .4 : 1;
   requestAnimationFrame(() => fx.set(fxp, (FX_LEVELS.find(l => l[0] === fxl) || FX_LEVELS[1])[2]));
   $("#modeBtn").textContent = mode === "light" ? "🌙" : "☀️";
   document.querySelectorAll("#modePick [data-mode]").forEach(b => b.classList.toggle("on", b.dataset.mode === (settings.mode || "dark")));
-  document.querySelectorAll("#themePick [data-theme]").forEach(b => b.classList.toggle("on", b.dataset.theme === (settings.theme || "neon")));
+  document.querySelectorAll("#themePick [data-theme]").forEach(b => b.classList.toggle("on", b.dataset.theme === (settings.theme || "ocean")));
 }
 const saveAppearance = () => { store.save(KEY_SETTINGS, settings); applyAppearance(); };
 $("#modePick").addEventListener("click", e => { const b = e.target.closest("[data-mode]"); if (b){ settings.mode = b.dataset.mode; saveAppearance(); } });
