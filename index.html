@@ -597,7 +597,7 @@
   </div>
 </header>
 
-<div class="backupbar" id="backupBar"><div class="wrap">⚠️ MyAnimeList (via Jikan) isn't responding, so scores and info are coming from <b>AniList</b> for now. Use <i>Refresh all</i> in Settings later to switch back to MAL. <a href="#" data-diag>Why?</a></div></div>
+<div class="backupbar" id="backupBar"><div class="wrap">⚠️ <span id="backupMsg"></span> <a href="#" data-diag>Why?</a></div></div>
 <main class="wrap">
   <!-- MY LIST -->
   <section class="view on" id="view-list">
@@ -754,10 +754,15 @@
     </div>
 
     <div class="panel" style="--d:80ms;--c:linear-gradient(180deg,var(--gold),var(--orange))">
-      <h3>MAL data</h3>
-      <p>Scores and ranks on MAL change over time. Refresh pulls the latest info and art for every anime on your list (about one per half-second).</p>
+      <h3>Anime info</h3>
+      <p>Where scores, ranks, summaries and art come from. Your list always uses MAL IDs, so you can switch any time. If one source can't be reached, the other is used automatically.</p>
+      <div class="modes" id="srcPick">
+        <button type="button" data-src="anilist">AniList (faster, more reliable)</button>
+        <button type="button" data-src="mal">MyAnimeList (via Jikan)</button>
+      </div>
+      <p style="margin-top:12px">Scores and ranks change over time. Refresh pulls the latest info and art for every anime on your list.</p>
       <div class="actions" style="justify-content:flex-start">
-        <button class="btn" id="refreshAll">Refresh all from MAL</button>
+        <button class="btn" id="refreshAll">Refresh all</button>
         <span class="hint" id="refreshStatus"></span>
       </div>
     </div>
@@ -942,12 +947,27 @@ const ANILIST_FIELDS = `idMal title{romaji english native} synonyms coverImage{e
   description(asHtml:false) genres tags{name rank isMediaSpoiler} studios(isMain:true){nodes{name}} episodes duration format
   seasonYear season status source siteUrl rankings{rank type allTime} trailer{id site}
   relations{edges{relationType node{idMal type format title{romaji english}}}}`;
+let alLast = 0, alChain = Promise.resolve();
+function alFetch(body){
+  const p = alChain.then(async () => {
+    for (let attempt = 0; attempt < 3; attempt++){
+      const wait = alLast + 350 - Date.now(); if (wait > 0) await sleep(wait);
+      alLast = Date.now();
+      let r;
+      try { r = await fetchT("https://graphql.anilist.co", { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body }); }
+      catch { const e = new Error("Couldn't reach AniList or MyAnimeList."); e.unreachable = true; throw e; }
+      if (r.status === 429){ const ra = Number(r.headers.get("retry-after")) || 0; if (attempt < 2 && ra <= 20){ await sleep((ra || 3) * 1000 + 300); continue; } }
+      if (r.status === 429 || r.status >= 500){ const e = new Error("AniList is busy right now (" + r.status + ")."); e.unreachable = true; throw e; }
+      return r;
+    }
+  });
+  alChain = p.catch(() => {});
+  return p;
+}
 async function anilist(vars){
   const query = `query($search:String,$sort:[MediaSort],$season:MediaSeason,$seasonYear:Int,$status:MediaStatus,$idMal:Int,$perPage:Int,$genre_in:[String]){
     Page(page:1,perPage:$perPage){ media(type:ANIME,isAdult:false,search:$search,sort:$sort,season:$season,seasonYear:$seasonYear,status:$status,idMal:$idMal,genre_in:$genre_in){ ${ANILIST_FIELDS} } } }`;
-  let r;
-  try { r = await fetchT("https://graphql.anilist.co", { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ query, variables: { perPage: 24, ...vars } }) }); }
-  catch { const e = new Error("Couldn't reach MyAnimeList or the AniList backup."); e.unreachable = true; throw e; }
+  const r = await alFetch(JSON.stringify({ query, variables: { perPage: 24, ...vars } }));
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.errors?.[0]?.message || "AniList error " + r.status);
   return (j.data?.Page?.media || []).filter(m => m.idMal).map(fromAniList);
@@ -979,10 +999,26 @@ let usingBackup = false;
 function setBackup(on){
   if (usingBackup === on) return;
   usingBackup = on;
+  $("#backupMsg").innerHTML = alFirst()
+    ? "AniList isn't responding, so info is coming from <b>MyAnimeList (Jikan)</b> for now."
+    : "MyAnimeList (via Jikan) isn't responding, so scores and info are coming from <b>AniList</b> for now. Use <i>Refresh all</i> in Settings later to switch back to MAL.";
   $("#backupBar").classList.toggle("on", on);
 }
 let malDownUntil = 0; // after a failure, skip Jikan for 2 minutes instead of waiting on it every time
+const alFirst = () => (settings.source || "anilist") === "anilist";
+let alDownUntil = 0;
 async function withFallback(malCall, backupCall){
+  if (alFirst()){
+    // AniList first (default). Jikan is only tried if AniList can't be reached.
+    try {
+      if (Date.now() < alDownUntil){ const e = new Error("skip"); e.unreachable = true; throw e; }
+      const r = await backupCall(); setBackup(false); return r;
+    } catch (err){
+      if (!err.unreachable) throw err;
+      if (Date.now() >= alDownUntil) alDownUntil = Date.now() + 120000;
+      const r = await malCall(); setBackup(true); return r;
+    }
+  }
   try {
     if (Date.now() < malDownUntil){ const e = new Error("skip"); e.unreachable = true; throw e; }
     const r = await malCall(); setBackup(false); return r;
@@ -1052,9 +1088,7 @@ async function cached(kind, id, loader, ttlDays = 5){
   return v;
 }
 async function anilistRaw(query, variables){
-  let r;
-  try { r = await fetchT("https://graphql.anilist.co", { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ query, variables }) }); }
-  catch { const e = new Error("Couldn't reach MyAnimeList or the AniList backup."); e.unreachable = true; throw e; }
+  const r = await alFetch(JSON.stringify({ query, variables }));
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.errors?.[0]?.message || "AniList error " + r.status);
   return j.data;
@@ -1582,7 +1616,7 @@ function openDetail(mal, id, opts = {}){
         ${siteLinksHTML(m)}
         <div class="hint" style="margin-top:12px"><a href="${esc(m.url)}" target="_blank" rel="noopener">Open on MyAnimeList ↗</a>
           ${entry ? ` · ${srcName(m)} data from ${new Date(m.fetchedAt).toLocaleDateString()} · <a href="#" id="refreshOne">Refresh</a>` : ""}</div>
-        ${m.via === "anilist" ? `<div class="hint" style="color:var(--warn-ink);margin-top:6px">MAL wasn't reachable, so the score, ranks and synopsis are from AniList. Refresh once MAL is back to get MAL's numbers.</div>` : ""}
+        ${m.via === "anilist" && !alFirst() ? `<div class="hint" style="color:var(--warn-ink);margin-top:6px">MAL wasn't reachable, so the score, ranks and synopsis are from AniList. Refresh once MAL is back to get MAL's numbers.</div>` : ""}
       </div>
     </div>
     <div class="mtabs" id="mtabs">
@@ -2741,7 +2775,7 @@ $("#refreshAll").addEventListener("click", async () => {
     s.textContent = `Refreshing ${i + 1} of ${ids.length}…`;
     try { const r = await api.get(id); if (data.entries[id]){ data.entries[id].mal = snapshot(r); ok++; } }
     catch { fail++; }
-    if (usingBackup) await sleep(2100); // stay under AniList's rate limit
+    if (alFirst() !== Boolean(usingBackup)) await sleep(2100); // stay under AniList's rate limit
     if (i % 5 === 4) persist();
   }
   persist(); renderList(false);
@@ -3213,6 +3247,12 @@ $("#fxLevel").addEventListener("click", e => { const b = e.target.closest("[data
 $("#modeBtn").addEventListener("click", () => { settings.mode = document.documentElement.dataset.mode === "light" ? "dark" : "light"; saveAppearance(); });
 sysLight.addEventListener?.("change", () => { if (settings.mode === "system") applyAppearance(); });
 applyAppearance();
+function syncSrcUI(){ document.querySelectorAll("#srcPick [data-src]").forEach(b => b.classList.toggle("on", b.dataset.src === (settings.source || "anilist"))); }
+$("#srcPick").addEventListener("click", e => { const b = e.target.closest("[data-src]"); if (!b) return;
+  settings.source = b.dataset.src; malDownUntil = 0; alDownUntil = 0; usingBackup = null; setBackup(false);
+  store.save(KEY_SETTINGS, settings); syncSrcUI();
+  toast(b.dataset.src === "anilist" ? "Using AniList. Use Refresh all to update your list's info." : "Using MyAnimeList. Use Refresh all to get MAL's scores and ranks."); });
+syncSrcUI();
 
 /* ---------------- Accounts & sync (Supabase) ---------------- */
 // Merge two copies of the list. Each anime keeps whichever version was edited most recently;
@@ -3242,7 +3282,7 @@ function mergeData(L, R){
   return out;
 }
 const pickData = d => ({ entries: d.entries || {}, order: d.order || [], chat: d.chat || [], deleted: d.deleted || {}, orderAt: d.orderAt || 0, chatAt: d.chatAt || 0 });
-const PREF_KEYS = ["mode", "theme", "fx", "fxLevel", "sites", "siteTitle", "provider", "models", "baseUrl", "autoApply", "listSort"];
+const PREF_KEYS = ["mode", "theme", "fx", "fxLevel", "source", "sites", "siteTitle", "provider", "models", "baseUrl", "autoApply", "listSort"];
 const pickPrefs = () => { const p = {}; PREF_KEYS.forEach(k => { if (settings[k] !== undefined) p[k] = settings[k]; }); return p; };
 let lastPrefSig = JSON.stringify(pickPrefs()), lastKeySig = JSON.stringify(settings.keys || {});
 
@@ -3332,7 +3372,7 @@ const sync = (() => {
           settings.prefsAt = rp.prefsAt; lastPrefSig = JSON.stringify(pickPrefs());
           applyingRemote = true; store.save(KEY_SETTINGS, settings); applyingRemote = false;
           if (settings.listSort) $("#listSort").value = settings.listSort;
-          applyAppearance(); renderSiteRows(); syncSettingsUI(); renderList(false);
+          applyAppearance(); syncSrcUI(); renderSiteRows(); syncSettingsUI(); renderList(false);
         } else if ((settings.prefsAt || 0) > (rp.prefsAt || 0)) push = true;
         // encrypted key vault
         vault = row.key_vault || null;
