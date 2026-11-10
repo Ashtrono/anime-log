@@ -20,6 +20,6 @@ Make it yours in **Settings → Appearance**: light or dark mode, color themes, 
 
 ## Credits
 
-Anime data comes from [MyAnimeList](https://myanimelist.net) through the free [Jikan API](https://jikan.moe), with [AniList](https://anilist.co) as a backup. This project isn't affiliated with any of them.
+Anime data comes from [AniList](https://anilist.co) by default, with [MyAnimeList](https://myanimelist.net) (through the free [Jikan API](https://jikan.moe)) as a backup. You can switch which one comes first in Settings. This project isn't affiliated with any of them.
 
 Licensed under [MIT](LICENSE).
