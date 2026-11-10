@@ -1,0 +1,48 @@
+# Free Supabase projects pause after about a week without database activity.
+# This runs a tiny database query every two days so sign-in and sync keep working.
+# It reads the project URL and public key from index.html, so there's nothing to configure.
+# If accounts aren't set up yet (empty SYNC_CONFIG), it just skips.
+name: Keep Supabase awake
+
+on:
+  schedule:
+    - cron: "23 7 */2 * *"   # 07:23 UTC every other day
+  workflow_dispatch:          # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read Supabase settings from index.html
+        id: cfg
+        run: |
+          URL=$(grep -oP 'url:\s*"\Khttps://[^"]+' index.html | head -1 || true)
+          KEY=$(grep -oP 'anonKey:\s*"\K[^"]+' index.html | head -1 || true)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          if [ -z "$URL" ] || [ -z "$KEY" ]; then
+            echo "::notice::Accounts aren't set up in index.html yet, so there's nothing to keep awake."
+          fi
+
+      - name: Ping the database
+        if: steps.cfg.outputs.url != '' && steps.cfg.outputs.key != ''
+        env:
+          URL: ${{ steps.cfg.outputs.url }}
+          KEY: ${{ steps.cfg.outputs.key }}
+        run: |
+          AUTH=()
+          case "$KEY" in eyJ*) AUTH=(-H "Authorization: Bearer $KEY");; esac
+          for attempt in 1 2 3; do
+            if curl -fsS -X POST "$URL/rest/v1/rpc/keep_alive" \
+                 -H "apikey: $KEY" "${AUTH[@]}" -H "Content-Type: application/json" -d '{}'; then
+              echo; echo "Database is awake."; exit 0
+            fi
+            echo "Attempt $attempt failed; retrying in 30s…"; sleep 30
+          done
+          echo "::error::Couldn't reach the database. If the project is paused, restore it from the Supabase dashboard. If keep_alive is missing, re-run supabase/setup.sql."
+          exit 1
