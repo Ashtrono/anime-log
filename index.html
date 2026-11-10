@@ -86,6 +86,15 @@
   .rowsite{font-size:12px;text-decoration:none;color:var(--c-ink);border:1px solid rgba(var(--c-rgb),.4);border-radius:8px;padding:1px 7px;font-weight:700}
   .rowsite:hover{background:rgba(var(--c-rgb),.18)}
   @media (max-width:760px){.siterow{grid-template-columns:1fr 1fr}.siterow input[data-k="url"]{grid-column:1/-1;grid-row:2}}
+  .impform{display:flex;gap:8px;flex-wrap:wrap}
+  .impform input{flex:1;min-width:200px}
+  .importout{margin-top:14px;font-size:14px}
+  .importout:empty{display:none}
+  .imp-summary{border:1px solid var(--line);border-radius:14px;padding:14px 16px;background:rgba(var(--hi-rgb),.03);animation:rise .3s both}
+  .imp-summary b{font-size:15px}
+  .imp-pills{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 6px}
+  .imp-progress .bar{height:8px;border-radius:99px;background:rgba(var(--hi-rgb),.08);overflow:hidden;margin-top:10px}
+  .imp-progress .bar i{display:block;height:100%;background:var(--grad);border-radius:99px;transition:width .4s}
   #fxCanvas{position:fixed;inset:0;width:100%;height:100%;z-index:-1;pointer-events:none}
   .fxgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px}
   .fxgrid button{background:rgba(var(--hi-rgb),.04);border:2px solid var(--line);border-radius:12px;padding:9px 8px;font-weight:700;font-size:13px;display:flex;align-items:center;gap:7px;transition:transform .2s,border-color .2s}
@@ -104,7 +113,7 @@
   .syncbtn.offline .si,.syncbtn.error .si{color:var(--bad)}
   @keyframes spin{to{transform:rotate(360deg)}}
   .syncbtn + .modebtn{margin-left:8px}
-  #acctPanel{scroll-margin-top:84px}
+  #acctPanel,#importPanel{scroll-margin-top:84px}
   .ghbtn{display:inline-flex;align-items:center;justify-content:center;gap:10px;width:100%;max-width:340px;margin-top:12px;background:#24292f;color:#fff;border-color:#24292f;font-weight:700;padding:11px 16px}
   .ghbtn:hover{background:#32383f;border-color:#32383f}
   .ordiv{display:flex;align-items:center;gap:10px;color:var(--faint);font-size:12px;margin:14px 0 2px;max-width:340px}
@@ -666,6 +675,17 @@
       <div id="acctBody"></div>
     </div>
 
+    <div class="panel" id="importPanel" style="--d:30ms;--c:linear-gradient(180deg,var(--violet),var(--pink))">
+      <h3>Import your list</h3>
+      <p>Bring in the anime you've already logged, with your scores, statuses, progress, dates and notes.</p>
+      <label for="impAniUser">From AniList</label>
+      <form id="impAniForm" class="impform"><input type="text" id="impAniUser" placeholder="Your AniList username" autocomplete="off"><button class="btn" id="impAniBtn" type="submit">Load list</button></form>
+      <label>From MyAnimeList</label>
+      <p class="hint" style="margin-top:0">On MyAnimeList, open <a href="https://myanimelist.net/panel.php?go=export" target="_blank" rel="noopener">Export lists ↗</a>, choose <b>Anime List</b>, click <b>Export</b> and download the file. Then choose it here.</p>
+      <div class="actions" style="justify-content:flex-start;margin-top:8px"><button class="btn" id="impMalBtn" type="button">Choose MAL export file</button><input type="file" id="impMalFile" accept=".gz,.xml,application/gzip,application/xml,text/xml" hidden></div>
+      <div id="importOut" class="importout"></div>
+    </div>
+
     <div class="panel" style="--d:0ms">
       <h3>Appearance</h3>
       <p>Pick light or dark, and the color range used for buttons, highlights and charts.</p>
@@ -754,6 +774,7 @@
         <input type="file" id="importFile" accept=".json,application/json" hidden>
       </div>
     </div>
+
   </section>
 </main>
 
@@ -1240,8 +1261,9 @@ function renderList(animate = true){
 
   const el = $("#list");
   if (!Object.keys(data.entries).length){
-    el.innerHTML = `<div class="empty"><b>Your list is empty</b>Head to <a href="#" id="goAdd">Add Anime</a> to search MyAnimeList and add what you've watched.</div>`;
+    el.innerHTML = `<div class="empty"><b>Your list is empty</b>Head to <a href="#" id="goAdd">Add Anime</a> to search MyAnimeList and add what you've watched, or <a href="#" id="goImport">import your list</a> from AniList or MyAnimeList.</div>`;
     $("#goAdd").onclick = e => { e.preventDefault(); show("discover"); };
+    $("#goImport").onclick = e => { e.preventDefault(); show("settings"); setTimeout(() => $("#importPanel").scrollIntoView({ behavior: "smooth", block: "start" }), 60); };
     return;
   }
   if (!ids.length){ el.innerHTML = `<div class="empty">Nothing matches that filter.</div>`; return; }
@@ -2669,6 +2691,127 @@ $("#importFile").addEventListener("change", async e => {
     persist(); renderList(); toast(`Imported — ${added} new anime`);
   } catch { toast("That file isn't an anime.log backup"); }
   e.target.value = "";
+});
+
+/* ---------------- Import from AniList / MyAnimeList ---------------- */
+// Same info we show for every anime, minus relations (kept light so big lists stay one fast request)
+const IMPORT_FIELDS = ANILIST_FIELDS.replace(/\s*relations\{[\s\S]*$/, "");
+const AL_STATUS = { CURRENT: "watching", REPEATING: "watching", COMPLETED: "completed", PAUSED: "onhold", DROPPED: "dropped", PLANNING: "plan" };
+const MAL_STATUS = { "completed": "completed", "watching": "watching", "on-hold": "onhold", "dropped": "dropped", "plan to watch": "plan", "1": "watching", "2": "completed", "3": "onhold", "4": "dropped", "6": "plan" };
+const alDate = d => d?.year && d?.month && d?.day ? `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}` : "";
+const malDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s || "") && !s.startsWith("0000") ? s.replace(/-00/g, "-01") : "";
+let pendingImport = null;
+
+async function importFromAniList(username){
+  const d = await anilistRaw(`query($u:String){MediaListCollection(userName:$u,type:ANIME){lists{entries{status score(format:POINT_10) progress repeat notes startedAt{year month day} completedAt{year month day} media{${IMPORT_FIELDS}}}}}}`, { u: username });
+  const lists = d?.MediaListCollection?.lists;
+  if (!lists) throw new Error("No list found. Check the username, and that the list isn't set to private on AniList.");
+  const items = [], seen = new Set(); let skipped = 0;
+  for (const e of lists.flatMap(l => l.entries || [])){
+    const m = e.media;
+    if (!m?.idMal){ skipped++; continue; }
+    if (seen.has(m.idMal)) continue; seen.add(m.idMal);
+    items.push({ id: m.idMal, mal: snapshot(fromAniList(m)), fields: {
+      status: AL_STATUS[e.status] || "plan", myScore: e.score ? Math.round(e.score) : null, progress: e.progress || 0,
+      rewatches: e.repeat || 0, note: e.notes || "", startDate: alDate(e.startedAt), finishDate: alDate(e.completedAt) } });
+  }
+  return { source: "AniList", items, skipped };
+}
+
+async function readMalExport(file){
+  let text;
+  if (/\.gz$/i.test(file.name) || (await file.slice(0, 2).arrayBuffer().then(b => new Uint8Array(b))).join() === "31,139"){
+    if (!("DecompressionStream" in window)) throw new Error("This browser can't open .gz files. Unzip the file first, then choose the .xml inside.");
+    text = await new Response(file.stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  } else text = await file.text();
+  const xml = new DOMParser().parseFromString(text, "application/xml");
+  const nodes = [...xml.getElementsByTagName("anime")];
+  if (!nodes.length) throw new Error("That doesn't look like a MyAnimeList anime list export.");
+  const get = (n, tag) => (n.getElementsByTagName(tag)[0]?.textContent || "").trim();
+  return nodes.map(n => ({
+    id: Number(get(n, "series_animedb_id")), title: get(n, "series_title"), type: get(n, "series_type"), episodes: Number(get(n, "series_episodes")) || null,
+    fields: {
+      status: MAL_STATUS[get(n, "my_status").toLowerCase()] || "plan", myScore: Number(get(n, "my_score")) || null,
+      progress: Number(get(n, "my_watched_episodes")) || 0, rewatches: Number(get(n, "my_times_watched")) || 0,
+      note: get(n, "my_comments"), startDate: malDate(get(n, "my_start_date")), finishDate: malDate(get(n, "my_finish_date")) }
+  })).filter(x => x.id);
+}
+
+// MAL's export has no art or synopses, so look them up on AniList, 50 at a time
+async function fillMalDetails(rows, onProgress){
+  const byId = {};
+  for (let i = 0; i < rows.length; i += 50){
+    const ids = rows.slice(i, i + 50).map(r => r.id);
+    try {
+      const d = await anilistRaw(`query($ids:[Int]){Page(perPage:50){media(idMal_in:$ids,type:ANIME){${IMPORT_FIELDS}}}}`, { ids });
+      for (const m of d?.Page?.media || []) byId[m.idMal] = snapshot(fromAniList(m));
+    } catch (err){ if (err.unreachable) throw err; }
+    onProgress(Math.min(rows.length, i + 50), rows.length);
+    if (i + 50 < rows.length) await sleep(700); // stay well under AniList's rate limit
+  }
+  return rows.map(r => ({ id: r.id, fields: r.fields, mal: byId[r.id] || {
+    via: "mal", title: r.title, title_english: "", title_japanese: "", image: "", score: null, rank: null, popularity: null, members: null,
+    synopsis: "", genres: [], studios: [], episodes: r.episodes, duration: "", type: r.type, year: null, season: "", airing: "", rating: "", source: "",
+    url: `https://myanimelist.net/anime/${r.id}`, trailer: null, durationMin: null, fetchedAt: 0 } }));
+}
+
+function showImportPreview(result){
+  pendingImport = result;
+  const its = result.items, existing = its.filter(x => data.entries[x.id]).length;
+  const by = s => its.filter(x => x.fields.status === s).length;
+  $("#importOut").innerHTML = `<div class="imp-summary">
+      <b>Found ${its.length} anime on ${esc(result.source)}</b>
+      <div class="imp-pills">${Object.entries(STATUS).map(([k, n]) => by(k) ? `<span class="pill ${k}">${by(k)} ${n}</span>` : "").join("")}</div>
+      ${existing ? `<p>${existing} of them ${existing === 1 ? "is" : "are"} already on your list.</p>
+        <label class="switch"><input type="checkbox" id="impReplace"> Replace those with the imported scores, status and notes (otherwise they're left as they are)</label>` : ""}
+      ${result.skipped ? `<p class="hint">${result.skipped} couldn't be matched to MyAnimeList and will be skipped.</p>` : ""}
+      ${result.missing ? `<p class="hint">${result.missing} ${result.missing === 1 ? "isn't" : "aren't"} on AniList, so ${result.missing === 1 ? "it'll come" : "they'll come"} in without art. Use <b>Refresh all from MAL</b> afterwards to fill ${result.missing === 1 ? "it" : "them"} in.</p>` : ""}
+      <div class="actions" style="justify-content:flex-start"><button class="btn primary" id="impGo">Add to my list</button><button class="btn ghost" id="impCancel">Cancel</button></div>
+    </div>`;
+}
+
+function applyImport(replace){
+  const r = pendingImport; if (!r) return;
+  let added = 0, updated = 0;
+  // Highest scores first so they land near the top of your ranking
+  const sorted = [...r.items].sort((a, b) => (b.fields.myScore || 0) - (a.fields.myScore || 0) || a.mal.title.localeCompare(b.mal.title));
+  for (const it of sorted){
+    const cur = data.entries[it.id];
+    if (cur && !replace) continue;
+    if (cur){ Object.assign(cur, it.fields, { updatedAt: Date.now() }); updated++; continue; }
+    data.entries[it.id] = newEntry(it.id, it.mal, it.fields);
+    placeByScore(it.id, it.fields.myScore); added++;
+  }
+  pendingImport = null;
+  persist(); refreshViews(); renderContinue(); heroKey = ""; renderListHero();
+  $("#importOut").innerHTML = `<p class="saved">✓ Added ${added} anime${updated ? ` and updated ${updated}` : ""}.</p>`;
+  const b = $("#impAniBtn").getBoundingClientRect(); burst(b.left + b.width / 2, b.top);
+  toast(`🎉 Imported ${added + updated} anime`);
+  setTimeout(() => scanRelations(), 2000);
+}
+
+$("#importOut").addEventListener("click", e => {
+  if (e.target.id === "impGo") applyImport($("#impReplace")?.checked);
+  if (e.target.id === "impCancel"){ pendingImport = null; $("#importOut").innerHTML = ""; }
+});
+$("#impAniForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const u = $("#impAniUser").value.trim(); if (!u) return toast("Enter your AniList username");
+  const btn = $("#impAniBtn"); btn.disabled = true;
+  $("#importOut").innerHTML = loadingHTML(`Loading ${u}'s list from AniList…`);
+  try { showImportPreview(await importFromAniList(u)); }
+  catch (err){ $("#importOut").innerHTML = `<p style="color:var(--bad)">${esc(/not found|private/i.test(err.message) ? "Couldn't find that AniList user, or their list is private." : err.message)}</p>`; }
+  finally { btn.disabled = false; }
+});
+$("#impMalBtn").addEventListener("click", () => $("#impMalFile").click());
+$("#impMalFile").addEventListener("change", async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  try {
+    const rows = await readMalExport(f);
+    $("#importOut").innerHTML = `<div class="imp-progress">${loadingHTML(`Found ${rows.length} anime. Getting their art and details…`)}<div class="bar"><i id="impBar" style="width:0%"></i></div></div>`;
+    const items = await fillMalDetails(rows, (n, t) => { const b = $("#impBar"); if (b) b.style.width = (n / t * 100) + "%"; });
+    showImportPreview({ source: "MyAnimeList", items, skipped: 0, missing: items.filter(x => !x.mal.image).length });
+  } catch (err){ $("#importOut").innerHTML = `<p style="color:var(--bad)">${esc(err.message)}</p>`; }
 });
 
 /* ---------------- Search sites ---------------- */
