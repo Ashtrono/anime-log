@@ -3557,8 +3557,19 @@ const sync = (() => {
     b.title = user ? `Signed in as ${user.email || user.user_metadata?.user_name || "you"}` : "Sign in to sync your list across devices";
     b.className = "syncbtn " + state;
   }
+  // Sync status updates re-draw this panel; keep whatever you're typing (and where the cursor is)
   function renderAccount(){
     const el = $("#acctBody"); if (!el) return;
+    const vals = {}, act = document.activeElement, focusId = el.contains(act) ? act.id : null;
+    const sel = focusId && typeof act.selectionStart === "number" ? [act.selectionStart, act.selectionEnd] : null;
+    el.querySelectorAll("input[id]").forEach(i => { vals[i.id] = i.type === "checkbox" ? i.checked : i.value; });
+    const openDetails = [...el.querySelectorAll("details")].map(d => d.open);
+    drawAccount(el);
+    el.querySelectorAll("input[id]").forEach(i => { if (i.id in vals){ if (i.type === "checkbox") i.checked = vals[i.id]; else if (!i.value) i.value = vals[i.id]; } });
+    el.querySelectorAll("details").forEach((d, n) => { if (openDetails[n]) d.open = true; });
+    if (focusId){ const f = document.getElementById(focusId); if (f){ f.focus({ preventScroll: true }); if (sel) try { f.setSelectionRange(...sel); } catch {} } }
+  }
+  function drawAccount(el){
     if (elsewhere){
       el.innerHTML = `<p>This copy of anime.log is hosted at a different address from the one its accounts were set up for, so sign-in is switched off and your list is saved in this browser only.</p>
         <p class="hint">Running this copy yourself? Put your own Supabase details in <code>SYNC_CONFIG</code> at the top of <code>index.html</code> (README → Forking), or set <code>site</code> to this address.</p>`;
