@@ -581,7 +581,10 @@
   /* compact mode: phones, narrow windows, or whenever the tabs don't fit */
   body.navcompact nav#nav{display:none}
   body.navcompact header .wrap{gap:10px}
-  body.navcompact .brand{margin-right:auto}
+  body.navcompact header .wrap{position:relative}
+  body.navcompact .brand{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);margin:0;white-space:nowrap}
+  body.navcompact .menubtn{margin-right:auto}
+  body.navcompact .syncbtn .st{display:none}
   body.navcompact .menubtn{display:flex;flex-direction:column;justify-content:center;gap:4px;width:42px;height:42px;border-radius:12px;border:1px solid var(--line);background:rgba(var(--hi-rgb),.06);padding:0 11px;flex:none;position:relative}
   body.navcompact .menubtn span{display:block;height:2px;border-radius:2px;background:var(--ink)}
   body.navcompact .menubtn span:nth-child(2){width:70%;background:var(--grad)}
