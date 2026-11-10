@@ -1274,7 +1274,7 @@ function renderList(animate = true){
 
 $("#listFilter").addEventListener("input", () => renderList(false));
 $("#listStatus").addEventListener("change", () => renderList());
-$("#listSort").addEventListener("change", () => renderList());
+$("#listSort").addEventListener("change", e => { settings.listSort = e.target.value; store.save(KEY_SETTINGS, settings); renderList(); });
 
 $("#list").addEventListener("click", e => {
   const inc = e.target.closest("[data-inc]");
@@ -3016,7 +3016,7 @@ function mergeData(L, R){
   return out;
 }
 const pickData = d => ({ entries: d.entries || {}, order: d.order || [], chat: d.chat || [], deleted: d.deleted || {}, orderAt: d.orderAt || 0, chatAt: d.chatAt || 0 });
-const PREF_KEYS = ["mode", "theme", "fx", "fxLevel", "sites", "siteTitle", "provider", "models", "baseUrl", "autoApply"];
+const PREF_KEYS = ["mode", "theme", "fx", "fxLevel", "sites", "siteTitle", "provider", "models", "baseUrl", "autoApply", "listSort"];
 const pickPrefs = () => { const p = {}; PREF_KEYS.forEach(k => { if (settings[k] !== undefined) p[k] = settings[k]; }); return p; };
 let lastPrefSig = JSON.stringify(pickPrefs()), lastKeySig = JSON.stringify(settings.keys || {});
 
@@ -3105,6 +3105,7 @@ const sync = (() => {
           PREF_KEYS.forEach(k => { if (rp[k] !== undefined) settings[k] = rp[k]; });
           settings.prefsAt = rp.prefsAt; lastPrefSig = JSON.stringify(pickPrefs());
           applyingRemote = true; store.save(KEY_SETTINGS, settings); applyingRemote = false;
+          if (settings.listSort) $("#listSort").value = settings.listSort;
           applyAppearance(); renderSiteRows(); syncSettingsUI(); renderList(false);
         } else if ((settings.prefsAt || 0) > (rp.prefsAt || 0)) push = true;
         // encrypted key vault
@@ -3316,6 +3317,7 @@ onSettingsChanged = () => {
 $("#syncBtn").addEventListener("click", () => { show("settings"); setTimeout(() => $("#acctPanel").scrollIntoView({ behavior: "smooth", block: "start" }), 60); });
 
 /* ---------------- Init ---------------- */
+if (settings.listSort) $("#listSort").value = settings.listSort;
 data.order = data.order.map(Number).filter((x, i, a) => data.entries[x] && a.indexOf(x) === i);
 Object.keys(data.entries).map(Number).forEach(id => { if (!data.order.includes(id)) data.order.push(id); });
 syncSettingsUI();
