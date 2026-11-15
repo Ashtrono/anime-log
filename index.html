@@ -2974,7 +2974,27 @@ $("#saveSettings").addEventListener("click", () => {
   $("#settingsSaved").textContent = "✓ Saved"; setTimeout(() => $("#settingsSaved").textContent = "", 1500);
 });
 /* Model picker: click the box to see every model; type to filter */
-const KEY_MODELS = "animeLog.modelLists.v1";
+const KEY_MODELS = "animeLog.modelLists.v2";
+const isOpenRouter = () => /openrouter\.ai/i.test($("#baseUrl").value || "");
+// Anthropic, Google and OpenAI don't publish usage numbers, so models are put in "most used" order:
+// chat models before special-purpose ones, newest generation first, the everyday model of each
+// generation (Sonnet / Flash / GPT) before the bigger and smaller ones, then previews and dated snapshots.
+function popularOrder(names, p){
+  const JUNK = /embed|tts|audio|image|imagen|veo|vision|live|aqa|learnlm|gemma|whisper|dall-?e|moderation|realtime|transcri|search|computer|robotics|native|instruct$|babbage|davinci|codex|sora/;
+  const FAM = p === "anthropic" ? [["sonnet", 0], ["opus", 1], ["fable", 2], ["haiku", 3]]
+            : p === "gemini" ? [["flash-lite", 2], ["flash", 0], ["pro", 1]]
+            : [["mini", 1], ["nano", 3], ["gpt", 0], ["o", 2]];
+  const key = n => {
+    const id = n.toLowerCase().replace(/^models\//, "");
+    const core = id.replace(/\d{8}|\d{4}-\d{2}-\d{2}/g, "").replace(/-(latest|\d{3})$/, "");
+    const v = core.match(/(\d+)(?:[.-](\d)(?!\d))?/);
+    const ver = v ? Number(v[1]) + (v[2] ? Number(v[2]) / 10 : 0) : 0;
+    const fam = (FAM.find(([f]) => p === "openai" && f === "o" ? /^o\d/.test(id) : id.includes(f)) || [, 4])[1];
+    const odd = (/preview|exp|experimental|beta|alpha/.test(id) ? 2 : 0) + (core !== id.replace(/-latest$/, "") ? 1 : 0);
+    return [JUNK.test(id) ? 1 : 0, -ver, fam, odd, id.length, id];
+  };
+  return names.map(n => [key(n), n]).sort((a, b) => { for (let i = 0; i < a[0].length; i++){ if (a[0][i] < b[0][i]) return -1; if (a[0][i] > b[0][i]) return 1; } return 0; }).map(x => x[1]);
+}
 let modelLists = store.load(KEY_MODELS, {});
 const modelListKey = p => p === "openai" ? "openai|" + ($("#baseUrl").value.trim() || "https://api.openai.com/v1") : p;
 async function fetchModelNames(p, key){
@@ -2985,9 +3005,10 @@ async function fetchModelNames(p, key){
     return (j.data || []).map(m => m.id);
   }
   const base = ($("#baseUrl").value.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const r = await fetch(base + "/models", { headers: { authorization: "Bearer " + key } });
+  // OpenRouter can sort by real usage
+  const r = await fetch(base + "/models" + (isOpenRouter() ? "?sort=most-popular" : ""), { headers: { authorization: "Bearer " + key } });
   const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error?.message || "Error " + r.status);
-  return (j.data || []).map(m => m.id).sort();
+  return (j.data || []).map(m => m.id);
 }
 let modelLoading = null, popIdx = -1, popTyped = false;
 async function loadModelList(force){
@@ -3000,6 +3021,7 @@ async function loadModelList(force){
   if (modelPopOpen()) renderModelPop();
   modelLoading = fetchModelNames(p, key).then(names => {
     names = [...new Set(names.map(String))].filter(Boolean);
+    if (!(p === "openai" && isOpenRouter())) names = popularOrder(names, p);
     modelLists[k] = { at: Date.now(), names }; store.save(KEY_MODELS, modelLists);
     return names;
   }).finally(() => { modelLoading = null; btn.disabled = false; btn.textContent = "Load models"; });
@@ -3018,7 +3040,7 @@ function renderModelPop(){
   if (!shown.length){ pop.innerHTML = `<div class="cempty">No models match “${esc(q)}”. You can still type any model name.</div>`; return; }
   popIdx = Math.min(popIdx, shown.length - 1);
   const hl = n => { if (!q) return esc(n); const i = n.toLowerCase().indexOf(q); return esc(n.slice(0, i)) + "<mark>" + esc(n.slice(i, i + q.length)) + "</mark>" + esc(n.slice(i + q.length)); };
-  pop.innerHTML = `<div class="ccount">${q ? `${shown.length} of ${names.length}` : names.length} models</div>` +
+  pop.innerHTML = `<div class="ccount">${q ? `${shown.length} of ${names.length}` : names.length} models · ${$("#provider").value === "openai" && isOpenRouter() ? "most popular on OpenRouter first" : "most used first"}</div>` +
     shown.map((n, i) => `<div class="copt${n === cur ? " cur" : ""}${i === popIdx ? " act" : ""}" role="option" data-model="${esc(n)}">${hl(n)}${n === cur ? " ✓" : ""}</div>`).join("");
   pop.querySelector(".act")?.scrollIntoView({ block: "nearest" });
 }
