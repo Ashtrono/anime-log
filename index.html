@@ -1056,6 +1056,23 @@ async function alLookup(vars){
   if (!r.ok) throw new Error(j.errors?.[0]?.message || "AniList error " + r.status);
   return j.data?.Page?.media || [];
 }
+// Most helpful user reviews + how AniList users scored it
+async function alReviews(vars){
+  const query = `query($search:String,$idMal:Int,$sort:[MediaSort]){ Page(page:1,perPage:1){ media(type:ANIME,isAdult:false,search:$search,idMal:$idMal,sort:$sort){
+    idMal title{romaji english} averageScore popularity stats{scoreDistribution{score amount}}
+    reviews(sort:[RATING_DESC],perPage:5){ nodes{ summary score rating ratingAmount body(asHtml:false) } } } } }`;
+  const r = await alFetch(JSON.stringify({ query, variables: vars }));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.errors?.[0]?.message || "AniList error " + r.status);
+  const m = j.data?.Page?.media?.[0]; if (!m) return "(no results)";
+  const t = m.title.english || m.title.romaji;
+  const dist = m.stats?.scoreDistribution || [], tot = dist.reduce((a, d) => a + d.amount, 0);
+  const pct = f => tot ? Math.round(100 * dist.filter(d => f(d.score)).reduce((a, d) => a + d.amount, 0) / tot) + "%" : "?";
+  const clean = x => String(x || "").replace(/~![\s\S]*?!~/g, " [spoiler removed] ").replace(/<span class=['"]markdown_spoiler['"]>[\s\S]*?<\/span>/g, " [spoiler removed] ").replace(/<[^>]+>/g, " ").replace(/~!|!~|__|\*\*|~~~|#+ |img\d*%?\([^)]*\)|youtube\([^)]*\)|webm\([^)]*\)|\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\s+/g, " ").trim();
+  const revs = (m.reviews?.nodes || []).map(v => `- Review scored ${v.score}/100 (${v.rating}/${v.ratingAmount} readers found it helpful): "${clean(v.summary)}". Excerpt: ${clean(v.body).slice(0, 600)}…`);
+  return `${t} ${m.idMal ? `[mal_id ${m.idMal}]` : ""} | AniList average ${m.averageScore ? (m.averageScore / 10).toFixed(1) : "n/a"} from ${tot} ratings: ${pct(s => s >= 80)} scored it 8+, ${pct(s => s <= 50)} scored it 5 or lower\n`
+    + (revs.length ? `Most helpful user reviews (may contain spoilers):\n${revs.join("\n")}` : "(no written reviews yet)");
+}
 function lookupLine(m, long){
   const t = m.title.english && m.title.english !== m.title.romaji ? `${m.title.english} (${m.title.romaji})` : (m.title.romaji || m.title.english);
   const tc = x => x ? x.toLowerCase().replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "";
@@ -1079,6 +1096,11 @@ function parseLookup(text){
 const SEASONS = ["WINTER", "SPRING", "SUMMER", "FALL"];
 function lookupPlan(q){
   const tc = x => x.charAt(0) + x.slice(1).toLowerCase();
+  if (q.reviews != null){
+    const v = q.reviews, id = Number(v);
+    return id ? { label: `reviews of MAL #${id}`, kind: "reviews", vars: { idMal: id } }
+              : { label: `reviews of “${String(v).slice(0, 60)}”`, kind: "reviews", vars: { search: String(v).slice(0, 100), sort: ["SEARCH_MATCH"] } };
+  }
   if (q.mal_id) return { label: `MAL #${q.mal_id}`, vars: { idMal: Number(q.mal_id), perPage: 1 }, long: true };
   if (q.search) return { label: `“${String(q.search).slice(0, 60)}”`, vars: { search: String(q.search).slice(0, 100), sort: ["SEARCH_MATCH"], perPage: 6 } };
   if (q.season || q.year){
@@ -1095,6 +1117,7 @@ async function runLookups(qs){
     const plan = lookupPlan(q); if (!plan) continue;
     labels.push(plan.label);
     try {
+      if (plan.kind === "reviews"){ out.push(`### AniList: ${plan.label}\n${await alReviews(plan.vars)}`); continue; }
       const res = await alLookup(plan.vars);
       out.push(`### AniList: ${plan.label}\n${res.length ? res.map(m => lookupLine(m, plan.long)).join("\n") : "(no results)"}`);
     } catch (err){ out.push(`### AniList: ${plan.label}\n(lookup failed: ${err.message})`); }
@@ -2588,7 +2611,8 @@ ${settings.aiLookup === false ? "" : `LOOKING THINGS UP ON ANILIST: Your own kno
 \`\`\`anilist
 [{"search":"Frieren"}]
 \`\`\`
-Each item is one of: {"search":"title"} (find a show and its sequels/prequels), {"mal_id":52991} (full details of one show), {"season":"fall","year":${new Date().getFullYear()}} (most popular shows that season), {"airing":true} (trending shows airing now), {"upcoming":true} (most anticipated shows not out yet). Up to 3 items per block.
+Each item is one of: {"search":"title"} (find a show and its sequels/prequels), {"mal_id":52991} (full details of one show), {"season":"fall","year":${new Date().getFullYear()}} (most popular shows that season), {"airing":true} (trending shows airing now), {"upcoming":true} (most anticipated shows not out yet), {"reviews":"title"} or {"reviews":52991} (the most helpful AniList user reviews and how users scored it; use when they ask what people think of a show, whether it's worth watching, or how a new season is being received). Up to 3 items per block.
+When you use reviews, sum up what reviewers say in your own words (a few short quotes at most), say it's what some AniList users think, and don't reveal plot spoilers from them unless the user asks.
 The app runs the lookup and sends you the results; then give your real answer. You can look things up at most 3 times per answer. When AniList and your memory disagree, trust AniList. Don't look things up when you don't need to (e.g. classic recommendations or list edits). Never mention this block or the lookup process to the user beyond a brief "according to AniList" when useful.
 
 `}EDITING THE LIST: You can change the user's list. When they ask you to add anime, score or re-score something, change a status, episode progress or note, reorder their ranking, or remove something, or when they tell you they watched something and how they felt about it, end your reply with ONE fenced block in exactly this format:
