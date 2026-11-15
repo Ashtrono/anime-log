@@ -331,6 +331,8 @@
   .ri-m{color:var(--faint);font-size:12.5px}
   .ri-meta{display:inline-flex;gap:6px;align-items:center;margin-left:auto}
   .ri-meta .badge{padding:2px 8px;border-radius:7px;font-size:11px;font-weight:800;color:#fff}
+  .lookups{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--faint);background:rgba(var(--c-rgb),.10);border:1px solid rgba(var(--c-rgb),.25);border-radius:999px;padding:3px 11px;margin:0 0 10px}
+  .lookups.live{color:var(--ink);animation:pulse 1.4s ease-in-out infinite}
   .ri-fix{border:1px solid var(--line);background:none;color:var(--faint);border-radius:8px;padding:2px 8px;font-size:11px;font-weight:700;transition:color .15s,border-color .15s}
   .ri-fix:hover{color:var(--ink);border-color:rgba(var(--p-rgb),.6)}
   .picker{padding:26px 28px 24px}
@@ -779,6 +781,7 @@
       </div>
       <datalist id="modelList"></datalist>
       <div class="hint" id="modelHint"></div>
+      <label class="switch"><input type="checkbox" id="aiLookup"> Let the AI look up current anime on AniList (new seasons, what's airing, release dates)</label>
       <label class="switch"><input type="checkbox" id="autoApply"> Let the AI apply list changes without asking (you can always undo)</label>
       <div class="actions" style="justify-content:flex-start">
         <button class="btn primary" id="saveSettings">Save</button>
@@ -1039,6 +1042,64 @@ function fromAniList(m){
     trailer: m.trailer?.site === "youtube" ? { youtube_id: m.trailer.id } : null,
     _relations: alRelations(m.relations)
   };
+}
+
+/* ---------------- AI lookups: the AI can search AniList for current info ---------------- */
+const LOOKUP_FIELDS = `idMal title{romaji english} synonyms format status episodes season seasonYear startDate{year month day}
+  averageScore popularity genres studios(isMain:true){nodes{name}} description(asHtml:false) nextAiringEpisode{episode airingAt}
+  relations{edges{relationType node{idMal type format status seasonYear title{romaji english}}}}`;
+async function alLookup(vars){
+  const query = `query($search:String,$sort:[MediaSort],$season:MediaSeason,$seasonYear:Int,$status:MediaStatus,$idMal:Int,$perPage:Int){
+    Page(page:1,perPage:$perPage){ media(type:ANIME,isAdult:false,search:$search,sort:$sort,season:$season,seasonYear:$seasonYear,status:$status,idMal:$idMal){ ${LOOKUP_FIELDS} } } }`;
+  const r = await alFetch(JSON.stringify({ query, variables: vars }));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.errors?.[0]?.message || "AniList error " + r.status);
+  return j.data?.Page?.media || [];
+}
+function lookupLine(m, long){
+  const t = m.title.english && m.title.english !== m.title.romaji ? `${m.title.english} (${m.title.romaji})` : (m.title.romaji || m.title.english);
+  const tc = x => x ? x.toLowerCase().replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "";
+  const fmt = x => ({ TV: "TV", TV_SHORT: "TV short", MOVIE: "Movie", SPECIAL: "Special", OVA: "OVA", ONA: "ONA", MUSIC: "Music" })[x] || tc(x);
+  const sd = m.startDate?.year ? [m.startDate.year, m.startDate.month, m.startDate.day].filter(Boolean).map((n, i) => i ? String(n).padStart(2, "0") : n).join("-") : "";
+  const next = m.nextAiringEpisode ? `next: ep ${m.nextAiringEpisode.episode} on ${new Date(m.nextAiringEpisode.airingAt * 1000).toISOString().slice(0, 10)}` : "";
+  const desc = (m.description || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, long ? 700 : 220);
+  const rel = (m.relations?.edges || []).filter(e => e.node.type === "ANIME" && ["SEQUEL", "PREQUEL", "PARENT", "SIDE_STORY", "SPIN_OFF", "ALTERNATIVE"].includes(e.relationType))
+    .slice(0, long ? 10 : 4).map(e => `${tc(e.relationType)}: ${e.node.title.english || e.node.title.romaji}${e.node.idMal ? ` [mal_id ${e.node.idMal}]` : ""} (${[fmt(e.node.format), e.node.seasonYear, tc(e.node.status)].filter(Boolean).join(", ")})`);
+  return `- ${t} ${m.idMal ? `[mal_id ${m.idMal}]` : "[no MAL id yet]"} | ${[fmt(m.format), m.season && m.seasonYear ? tc(m.season) + " " + m.seasonYear : m.seasonYear].filter(Boolean).join(" ")}`
+    + ` | ${tc(m.status)}${m.episodes ? ", " + m.episodes + " eps" : ""}${sd ? ", started " + sd : ""}${next ? ", " + next : ""}`
+    + ` | AniList score ${m.averageScore ? (m.averageScore / 10).toFixed(1) : "n/a"}, ${m.popularity || 0} users`
+    + ` | ${(m.genres || []).slice(0, 5).join(", ")}${m.studios?.nodes?.[0] ? " | " + m.studios.nodes[0].name : ""}`
+    + (desc ? ` | ${desc}` : "") + (rel.length ? ` | related: ${rel.join("; ")}` : "");
+}
+function parseLookup(text){
+  const m = text.match(/```anilist\s*([\s\S]*?)(?:```|$)/); if (!m) return null;
+  try { let q = JSON.parse(m[1].trim()); if (!Array.isArray(q)) q = [q]; q = q.filter(x => x && typeof x === "object").slice(0, 3); return q.length ? q : null; }
+  catch { return null; }
+}
+const SEASONS = ["WINTER", "SPRING", "SUMMER", "FALL"];
+function lookupPlan(q){
+  const tc = x => x.charAt(0) + x.slice(1).toLowerCase();
+  if (q.mal_id) return { label: `MAL #${q.mal_id}`, vars: { idMal: Number(q.mal_id), perPage: 1 }, long: true };
+  if (q.search) return { label: `“${String(q.search).slice(0, 60)}”`, vars: { search: String(q.search).slice(0, 100), sort: ["SEARCH_MATCH"], perPage: 6 } };
+  if (q.season || q.year){
+    const cur = currentSeason(), season = SEASONS.includes(String(q.season || "").toUpperCase()) ? String(q.season).toUpperCase() : cur.season, year = Number(q.year) || cur.seasonYear;
+    return { label: `${tc(season)} ${year} season`, vars: { season, seasonYear: year, sort: ["POPULARITY_DESC"], perPage: 20 } };
+  }
+  if (q.upcoming) return { label: "upcoming anime", vars: { status: "NOT_YET_RELEASED", sort: ["POPULARITY_DESC"], perPage: 20 } };
+  if (q.airing) return { label: "airing now", vars: { status: "RELEASING", sort: ["TRENDING_DESC"], perPage: 20 } };
+  return null;
+}
+async function runLookups(qs){
+  const out = [], labels = [];
+  for (const q of qs){
+    const plan = lookupPlan(q); if (!plan) continue;
+    labels.push(plan.label);
+    try {
+      const res = await alLookup(plan.vars);
+      out.push(`### AniList: ${plan.label}\n${res.length ? res.map(m => lookupLine(m, plan.long)).join("\n") : "(no results)"}`);
+    } catch (err){ out.push(`### AniList: ${plan.label}\n(lookup failed: ${err.message})`); }
+  }
+  return { labels, text: out.join("\n\n") || "(no valid lookups)" };
 }
 
 /* ---------------- Data layer: MAL first, AniList if MAL is unreachable ---------------- */
@@ -2237,7 +2298,7 @@ function renderChat(){
     if (m.role === "user") return `<div class="msg user" style="animation:none"><p>${esc(m.content).replace(/\n/g, "<br>")}</p></div>`;
     const body = mdLite(m.content);
     const recs = body.includes('class="ri ') ? [] : recTitles(m.content);
-    return `<div class="msg assistant" style="${i === data.chat.length - 1 && !pending ? "" : "animation:none"}">${body}
+    return `<div class="msg assistant" style="${i === data.chat.length - 1 && !pending ? "" : "animation:none"}">${m.lookups?.length ? `<div class="lookups">🔎 Checked AniList: ${m.lookups.map(esc).join(" · ")}</div>` : ""}${body}
       ${recs.length ? `<div class="recstrip">${recs.map(posterHTML).join("")}</div>` : ""}${actionCardHTML(m, i)}</div>`;
   }).join("") + (pending ? `<div class="msg assistant" id="liveMsg">${liveHTML()}</div>` : "")
     + (chat.error ? `<div class="msg error">${chat.error}</div>` : "");
@@ -2474,9 +2535,10 @@ $("#msgs").addEventListener("click", e => {
 });
 // What the AI is told about earlier proposals, so it knows what actually happened
 function historyContent(m){
+  if (m.role === "assistant" && m.lookupNote && !m.actions) return `${m.content}\n\n[App note: AniList results you used for this answer]\n${m.lookupNote}`;
   if (m.role !== "assistant" || !m.actions) return m.content;
   const what = m.actions.map((a, k) => { const r = m.results?.[k]; return `${a.op} ${a.title || titleOf(Number(a.mal_id))}: ${r?.ok ? "applied" : r?.error ? "failed (" + r.error + ")" : m.state === "dismissed" ? "dismissed by user" : m.state === "undone" ? "undone by user" : "not applied yet"}`; });
-  return `${m.content}\n\n[App note: proposed list changes → ${what.join("; ")}]`;
+  return `${m.content}\n\n[App note: proposed list changes → ${what.join("; ")}]${m.lookupNote ? `\n\n[App note: AniList results you used for this answer]\n${m.lookupNote}` : ""}`;
 }
 
 function systemPrompt(){
@@ -2522,7 +2584,14 @@ FORMATTING (the app renders this as Markdown, so follow it closely):
 - Use **bold** sparingly for the key point. No tables unless they ask for a comparison. Don't nest lists more than one level.
 - Usually 3 to 6 recommendations; more only if they ask.
 
-EDITING THE LIST: You can change the user's list. When they ask you to add anime, score or re-score something, change a status, episode progress or note, reorder their ranking, or remove something, or when they tell you they watched something and how they felt about it, end your reply with ONE fenced block in exactly this format:
+${settings.aiLookup === false ? "" : `LOOKING THINGS UP ON ANILIST: Your own knowledge of anime may be out of date. Before answering about anything recent or current (what's airing now, this or next season, upcoming releases, new seasons, sequels or movies, release dates, or a show you don't know or aren't sure about), look it up on AniList. To do that, reply with ONLY a fenced block like this and nothing else:
+\`\`\`anilist
+[{"search":"Frieren"}]
+\`\`\`
+Each item is one of: {"search":"title"} (find a show and its sequels/prequels), {"mal_id":52991} (full details of one show), {"season":"fall","year":${new Date().getFullYear()}} (most popular shows that season), {"airing":true} (trending shows airing now), {"upcoming":true} (most anticipated shows not out yet). Up to 3 items per block.
+The app runs the lookup and sends you the results; then give your real answer. You can look things up at most 3 times per answer. When AniList and your memory disagree, trust AniList. Don't look things up when you don't need to (e.g. classic recommendations or list edits). Never mention this block or the lookup process to the user beyond a brief "according to AniList" when useful.
+
+`}EDITING THE LIST: You can change the user's list. When they ask you to add anime, score or re-score something, change a status, episode progress or note, reorder their ranking, or remove something, or when they tell you they watched something and how they felt about it, end your reply with ONE fenced block in exactly this format:
 \`\`\`list-actions
 [
   {"op":"add","title":"Vinland Saga","mal_id":37521,"status":"completed","score":9,"note":"Loved Thorfinn's arc"},
@@ -2689,10 +2758,12 @@ $("#seePrompt").addEventListener("click", () => {
 const chat = { busy: false, live: "", ctrl: null, error: null, unread: false };
 let liveRAF = 0;
 function liveHTML(){
-  const cut = chat.live.search(/```(list-actions|actions|json)/);
+  if (chat.status && (!chat.live.trim() || /```anilist/.test(chat.live))) return `<div class="lookups live">${esc(chat.status)}</div><span class="typing"><span></span><span></span><span></span></span>`;
+  if (/^\s*```anilist/.test(chat.live)) return `<div class="lookups live">🔎 Searching AniList…</div>`;
+  const cut = chat.live.search(/```(list-actions|actions|json|anilist)/);
   const shown = cut >= 0 ? chat.live.slice(0, cut) : chat.live;
   return (shown.trim() ? mdLite(shown) : `<span class="typing"><span></span><span></span><span></span></span>`) +
-    (cut >= 0 ? `<div class="acard"><h6>Proposed changes to your list</h6>${loadingHTML("Preparing changes…")}</div>` : "");
+    (cut >= 0 && !/```anilist/.test(chat.live) ? `<div class="acard"><h6>Proposed changes to your list</h6>${loadingHTML("Preparing changes…")}</div>` : "");
 }
 function paintLive(){
   cancelAnimationFrame(liveRAF);
@@ -2718,6 +2789,25 @@ function setBusyUI(){
   navB.classList.toggle("thinking", chat.busy);
 }
 
+// Ask the AI; if it asks to look something up on AniList, run it, hand back the results and ask again (max 3 times)
+async function runWithLookups(convo, signal){
+  convo = convo.slice(); const labels = [], notes = [];
+  for (let round = 0; ; round++){
+    chat.live = "";
+    const { text } = await callAI(convo, { signal, onText: t => { chat.live = t; paintLive(); } });
+    const qs = settings.aiLookup !== false && round < 3 ? parseLookup(text) : null;
+    if (!qs) return { text, labels, notes };
+    const plans = qs.map(lookupPlan).filter(Boolean);
+    chat.status = "🔎 Searching AniList: " + (plans.map(x => x.label).join(", ") || "…"); chat.live = ""; paintLive();
+    const res = await runLookups(qs);
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    labels.push(...res.labels); notes.push(res.text);
+    chat.status = "✍️ Writing the answer…"; paintLive();
+    convo.push({ role: "assistant", content: text.trim() },
+      { role: "user", content: `[App message, not from the user: AniList results for your lookup, as of ${todayStr()}]\n${res.text}\n\nNow answer the user's last message using these results.${round >= 2 ? " No more lookups are available for this answer." : ""}` });
+  }
+}
+
 async function send(text){
   text = text.trim(); if (!text) return;
   if (chat.busy) return toast("Still answering. Wait a moment, or press Stop.");
@@ -2727,13 +2817,10 @@ async function send(text){
   $("#chatInput").value = ""; autoGrow();
   renderChat();
   const last = $("#msgs .msg.user:last-of-type"); if (last) last.style.animation = "";
-  let finished = null;
+  let finished = null, lookups = null;
   try {
-    const { text: reply } = await callAI(data.chat.slice(-20).map(m => ({ role: m.role, content: historyContent(m) })), {
-      signal: chat.ctrl.signal,
-      onText: t => { chat.live = t; paintLive(); }
-    });
-    finished = reply;
+    const r = await runWithLookups(data.chat.slice(-20).map(m => ({ role: m.role, content: historyContent(m) })), chat.ctrl.signal);
+    finished = r.text; lookups = r;
   } catch (err){
     if (err.name === "AbortError"){
       finished = chat.live ? chat.live + "\n\n*(stopped)*" : null;
@@ -2746,12 +2833,13 @@ async function send(text){
       if (!$("#chatInput").value) $("#chatInput").value = text;
     }
   } finally {
-    chat.busy = false; chat.ctrl = null; chat.live = "";
+    chat.busy = false; chat.ctrl = null; chat.live = ""; chat.status = "";
     setBusyUI();
   }
   if (finished != null){
     const { text: shown, actions, error } = splitActions(finished || "(no reply)");
-    const msg = { role: "assistant", content: shown || "Here are the changes:" };
+    const msg = { role: "assistant", content: (shown || "Here are the changes:").replace(/```anilist[\s\S]*?(```|$)/g, "").trim() || "(no reply)" };
+    if (lookups?.labels.length){ msg.lookups = lookups.labels; msg.lookupNote = lookups.notes.join("\n\n").slice(0, 2500); }
     if (actions?.length){ msg.actions = actions; msg.state = "pending"; }
     if (error) msg.actionError = error;
     data.chat.push(msg);
@@ -2812,6 +2900,7 @@ function syncSettingsUI(){
   $("#provider").value = settings.provider;
   $("#baseUrl").value = settings.baseUrl;
   $("#autoApply").checked = !!settings.autoApply;
+  $("#aiLookup").checked = settings.aiLookup !== false;
   updateProviderUI();
 }
 const HINTS = {
@@ -2843,6 +2932,7 @@ $("#saveSettings").addEventListener("click", () => {
   settings.models[p] = $("#model").value.trim();
   settings.baseUrl = $("#baseUrl").value.trim() || "https://api.openai.com/v1";
   settings.autoApply = $("#autoApply").checked;
+  settings.aiLookup = $("#aiLookup").checked;
   geminiAuto = null;
   store.save(KEY_SETTINGS, settings);
   $("#settingsSaved").textContent = "✓ Saved"; setTimeout(() => $("#settingsSaved").textContent = "", 1500);
@@ -3398,7 +3488,7 @@ function mergeData(L, R){
   return out;
 }
 const pickData = d => ({ entries: d.entries || {}, order: d.order || [], chat: d.chat || [], deleted: d.deleted || {}, orderAt: d.orderAt || 0, chatAt: d.chatAt || 0 });
-const PREF_KEYS = ["mode", "theme", "fx", "fxLevel", "source", "sites", "siteTitle", "provider", "models", "baseUrl", "autoApply", "listSort"];
+const PREF_KEYS = ["mode", "theme", "fx", "fxLevel", "source", "sites", "siteTitle", "provider", "models", "baseUrl", "autoApply", "aiLookup", "listSort"];
 const pickPrefs = () => { const p = {}; PREF_KEYS.forEach(k => { if (settings[k] !== undefined) p[k] = settings[k]; }); return p; };
 let lastPrefSig = JSON.stringify(pickPrefs()), lastKeySig = JSON.stringify(settings.keys || {});
 
