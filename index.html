@@ -333,6 +333,18 @@
   .ri-meta .badge{padding:2px 8px;border-radius:7px;font-size:11px;font-weight:800;color:#fff}
   .lookups{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--faint);background:rgba(var(--c-rgb),.10);border:1px solid rgba(var(--c-rgb),.25);border-radius:999px;padding:3px 11px;margin:0 0 10px}
   .lookups.live{color:var(--ink)}
+  .combo{position:relative;flex:1;min-width:0}
+  .combo input{width:100%}
+  .combopop{display:none;position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:30;max-height:300px;overflow-y:auto;padding:6px;
+    background:var(--panel-solid, rgba(var(--shade-rgb),.98));background:rgba(var(--shade-rgb),.98);backdrop-filter:blur(16px);border:1px solid var(--line);border-radius:14px;box-shadow:0 18px 50px rgba(0,0,0,.4)}
+  .combopop.on{display:block}
+  .panel:has(.combopop.on){overflow:visible;z-index:5}
+  .copt{padding:9px 12px;border-radius:9px;cursor:pointer;font-size:14px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+  .copt:hover,.copt.act{background:rgba(var(--hi-rgb),.10)}
+  .copt.cur{color:var(--cyan)}
+  .copt mark{background:rgba(var(--p-rgb),.35);color:inherit;border-radius:3px}
+  .ccount{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);padding:4px 12px 6px}
+  .cempty{padding:12px;color:var(--faint);font-size:14px}
   .ri-fix{border:1px solid var(--line);background:none;color:var(--faint);border-radius:8px;padding:2px 8px;font-size:11px;font-weight:700;transition:color .15s,border-color .15s}
   .ri-fix:hover{color:var(--ink);border-color:rgba(var(--p-rgb),.6)}
   .picker{padding:26px 28px 24px}
@@ -776,10 +788,10 @@
       <input type="password" id="apiKey" placeholder="Paste your API key" autocomplete="off">
       <label for="model">Model</label>
       <div style="display:flex;gap:10px">
-        <input type="text" id="model" placeholder="claude-sonnet-5-5" list="modelList" autocomplete="off">
+        <div class="combo"><input type="text" id="model" placeholder="claude-sonnet-5-5" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="modelPop" aria-autocomplete="list">
+          <div class="combopop" id="modelPop" role="listbox"></div></div>
         <button class="btn" id="loadModels" type="button" style="white-space:nowrap">Load models</button>
       </div>
-      <datalist id="modelList"></datalist>
       <div class="hint" id="modelHint"></div>
       <label class="switch"><input type="checkbox" id="aiLookup"> Let the AI look up current anime on AniList (new seasons, what's airing, release dates)</label>
       <label class="switch"><input type="checkbox" id="autoApply"> Let the AI apply list changes without asking (you can always undo)</label>
@@ -2939,7 +2951,7 @@ function updateProviderUI(){
   $("#baseUrlWrap").style.display = p === "openai" ? "" : "none";
   $("#model").placeholder = DEFAULT_MODEL[p];
   $("#modelHint").textContent = HINTS[p];
-  $("#modelList").innerHTML = "";
+  closeModelPop();
 }
 // Remember what's typed for the provider being edited before switching away
 let editingProvider = settings.provider;
@@ -2961,29 +2973,87 @@ $("#saveSettings").addEventListener("click", () => {
   store.save(KEY_SETTINGS, settings);
   $("#settingsSaved").textContent = "✓ Saved"; setTimeout(() => $("#settingsSaved").textContent = "", 1500);
 });
+/* Model picker: click the box to see every model; type to filter */
+const KEY_MODELS = "animeLog.modelLists.v1";
+let modelLists = store.load(KEY_MODELS, {});
+const modelListKey = p => p === "openai" ? "openai|" + ($("#baseUrl").value.trim() || "https://api.openai.com/v1") : p;
+async function fetchModelNames(p, key){
+  if (p === "gemini") return await geminiModels(key);
+  if (p === "anthropic"){
+    const r = await fetch("https://api.anthropic.com/v1/models?limit=1000", { headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" } });
+    const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error?.message || "Error " + r.status);
+    return (j.data || []).map(m => m.id);
+  }
+  const base = ($("#baseUrl").value.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const r = await fetch(base + "/models", { headers: { authorization: "Bearer " + key } });
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error?.message || "Error " + r.status);
+  return (j.data || []).map(m => m.id).sort();
+}
+let modelLoading = null, popIdx = -1, popTyped = false;
+async function loadModelList(force){
+  const p = $("#provider").value, key = $("#apiKey").value.trim(), k = modelListKey(p);
+  if (!key){ if (force) toast("Paste your API key first"); return null; }
+  const hit = modelLists[k];
+  if (!force && hit && hit.names.length && Date.now() - hit.at < 864e5) return hit.names;
+  if (modelLoading) return modelLoading;
+  const btn = $("#loadModels"); btn.disabled = true; btn.textContent = "Loading…";
+  if (modelPopOpen()) renderModelPop();
+  modelLoading = fetchModelNames(p, key).then(names => {
+    names = [...new Set(names.map(String))].filter(Boolean);
+    modelLists[k] = { at: Date.now(), names }; store.save(KEY_MODELS, modelLists);
+    return names;
+  }).finally(() => { modelLoading = null; btn.disabled = false; btn.textContent = "Load models"; });
+  return modelLoading;
+}
+const modelPopOpen = () => $("#modelPop").classList.contains("on");
+function closeModelPop(){ $("#modelPop").classList.remove("on"); $("#model").setAttribute("aria-expanded", "false"); popIdx = -1; }
+function renderModelPop(){
+  const pop = $("#modelPop"), names = modelLists[modelListKey($("#provider").value)]?.names || [];
+  const q = popTyped ? $("#model").value.trim().toLowerCase() : "";
+  const shown = q ? names.filter(n => n.toLowerCase().includes(q)) : names;
+  const cur = $("#model").value.trim();
+  pop.classList.add("on"); $("#model").setAttribute("aria-expanded", "true");
+  if (modelLoading && !names.length){ pop.innerHTML = `<div class="cempty">Loading models…</div>`; return; }
+  if (!names.length){ pop.innerHTML = `<div class="cempty">${$("#apiKey").value.trim() ? "No models loaded yet. Click <b>Load models</b>." : "Paste your API key above to see the models."}</div>`; return; }
+  if (!shown.length){ pop.innerHTML = `<div class="cempty">No models match “${esc(q)}”. You can still type any model name.</div>`; return; }
+  popIdx = Math.min(popIdx, shown.length - 1);
+  const hl = n => { if (!q) return esc(n); const i = n.toLowerCase().indexOf(q); return esc(n.slice(0, i)) + "<mark>" + esc(n.slice(i, i + q.length)) + "</mark>" + esc(n.slice(i + q.length)); };
+  pop.innerHTML = `<div class="ccount">${q ? `${shown.length} of ${names.length}` : names.length} models</div>` +
+    shown.map((n, i) => `<div class="copt${n === cur ? " cur" : ""}${i === popIdx ? " act" : ""}" role="option" data-model="${esc(n)}">${hl(n)}${n === cur ? " ✓" : ""}</div>`).join("");
+  pop.querySelector(".act")?.scrollIntoView({ block: "nearest" });
+}
+async function openModelPop(){
+  popTyped = false; popIdx = -1; renderModelPop();
+  try { await loadModelList(false); } catch (err){ $("#modelPop").innerHTML = `<div class="cempty">Couldn't load models: ${esc(err.message)}</div>`; return; }
+  if (document.activeElement === $("#model") || modelPopOpen()) renderModelPop();
+}
+function pickModel(n){ $("#model").value = n; closeModelPop(); $("#model").dispatchEvent(new Event("change")); }
+$("#model").addEventListener("focus", openModelPop);
+$("#model").addEventListener("click", () => { if (!modelPopOpen()) openModelPop(); });
+$("#model").addEventListener("input", () => { popTyped = true; popIdx = -1; renderModelPop(); });
+$("#model").addEventListener("keydown", e => {
+  const opts = [...$("#modelPop").querySelectorAll(".copt")];
+  if (e.key === "ArrowDown" || e.key === "ArrowUp"){
+    e.preventDefault(); if (!modelPopOpen()) return openModelPop();
+    if (!opts.length) return;
+    popIdx = e.key === "ArrowDown" ? (popIdx + 1) % opts.length : (popIdx <= 0 ? opts.length - 1 : popIdx - 1);
+    renderModelPop();
+  } else if (e.key === "Enter" && modelPopOpen() && popIdx >= 0 && opts[popIdx]){ e.preventDefault(); pickModel(opts[popIdx].dataset.model); }
+  else if (e.key === "Escape" && modelPopOpen()){ e.stopPropagation(); closeModelPop(); }
+  else if (e.key === "Tab") closeModelPop();
+});
+$("#modelPop").addEventListener("mousedown", e => e.preventDefault()); // keep focus in the box while picking
+$("#modelPop").addEventListener("click", e => { const o = e.target.closest("[data-model]"); if (o) pickModel(o.dataset.model); });
+document.addEventListener("pointerdown", e => { if (modelPopOpen() && !e.target.closest(".combo")) closeModelPop(); });
+$("#apiKey").addEventListener("change", () => { delete modelLists[modelListKey($("#provider").value)]; });
 $("#loadModels").addEventListener("click", async () => {
-  const p = $("#provider").value, key = $("#apiKey").value.trim(), btn = $("#loadModels");
-  if (!key) return toast("Paste your API key first");
-  btn.disabled = true; btn.textContent = "Loading…";
+  const p = $("#provider").value;
   try {
-    let names = [];
-    if (p === "gemini") names = await geminiModels(key);
-    else if (p === "anthropic"){
-      const r = await fetch("https://api.anthropic.com/v1/models?limit=100", { headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" } });
-      const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error?.message || "Error " + r.status);
-      names = (j.data || []).map(m => m.id);
-    } else {
-      const base = ($("#baseUrl").value.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
-      const r = await fetch(base + "/models", { headers: { authorization: "Bearer " + key } });
-      const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error?.message || "Error " + r.status);
-      names = (j.data || []).map(m => m.id).sort();
-    }
-    $("#modelList").innerHTML = names.map(n => `<option value="${esc(n)}">`).join("");
+    const names = await loadModelList(true); if (!names) return;
     if (p === "gemini" && !$("#model").value) $("#model").value = pickGemini(names) || "";
-    $("#model").focus();
-    toast(`${names.length} models found — pick one from the Model box`);
+    $("#model").focus(); popTyped = false; renderModelPop();
+    toast(`${names.length} models found. Pick one from the list.`);
   } catch (err){ toast(err.message); }
-  finally { btn.disabled = false; btn.textContent = "Load models"; }
 });
 
 $("#diagBtn").addEventListener("click", async () => {
